@@ -943,7 +943,7 @@ func forwardOAuthChatCompletionsForUpstreamBody(t *testing.T, body []byte) []byt
 		},
 	}
 
-	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.4")
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.NotEmpty(t, upstream.lastBody)
@@ -978,6 +978,8 @@ func TestForwardAsChatCompletions_OAuthMovesResponsesShapeInstructionsToDevelope
 		body := []byte(`{"model":"gpt-6.2-sol","instructions":"Only this turn.","input":[{"type":"message","role":"developer","content":"Stable prefix."},{"type":"message","role":"user","content":"hello"}],"stream":false}`)
 
 		upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+		require.Equal(t, "gpt-6.2-sol", gjson.GetBytes(upstreamBody, "model").String())
 
 		require.Equal(t, "Only this turn.", gjson.GetBytes(upstreamBody, "instructions").String())
 		require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
