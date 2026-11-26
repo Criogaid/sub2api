@@ -411,7 +411,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && !hasCodexLeadingDeveloperPrefixInRawBody(body) && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
+	if instructionsEmpty && (isCompactRequest || !hasCodexLeadingDeveloperPrefixInRawBody(body)) && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
 		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
 	}
 	if billingModel != requestedModel {
@@ -534,7 +534,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				PreserveToolCallIDs:     true,
 				ResponsesLite:           responsesLite,
 			})
-			applyCodexOAuthInstructionsAsDeveloper(decoded)
+			if !isCompactRequest {
+				applyCodexOAuthInstructionsAsDeveloper(decoded)
+			}
 			markDecodedModified()
 		} else {
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
@@ -542,7 +544,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				IsCompact:     isCompactRequest,
 				ResponsesLite: responsesLite,
 			})
-			if applyCodexOAuthInstructionsAsDeveloper(decoded) {
+			if !isCompactRequest && applyCodexOAuthInstructionsAsDeveloper(decoded) {
 				markDecodedModified()
 			}
 		}

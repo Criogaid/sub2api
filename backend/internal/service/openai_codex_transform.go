@@ -309,8 +309,9 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 	}
 
 	// Only synthesize default Codex instructions when the request has neither
-	// explicit instructions nor a leading developer prefix.
-	if !opts.SkipDefaultInstructions && !hasCodexLeadingDeveloperPrefix(reqBody) && applyInstructions(reqBody, opts.IsCodexCLI) {
+	// explicit instructions nor a leading developer prefix (compact requests
+	// keep top-level instructions for legacy endpoint compatibility).
+	if !opts.SkipDefaultInstructions && (opts.IsCompact || !hasCodexLeadingDeveloperPrefix(reqBody)) && applyInstructions(reqBody, opts.IsCodexCLI) {
 		result.Modified = true
 	}
 	if isCodexSparkModel(normalizedModel) && applyCodexSparkImageUnsupportedInstructions(reqBody) {
@@ -1437,6 +1438,21 @@ func prepareCodexOAuthInstructionsMigration(reqBody map[string]any) (string, []a
 	return text, input, codexLeadingDeveloperInsertIndex(input), true, false
 }
 
+// newCodexDeveloperInstructionsMessage builds the leading developer message
+// matching official Codex wire serialization (input_text content array).
+func newCodexDeveloperInstructionsMessage(text string) map[string]any {
+	return map[string]any{
+		"type": "message",
+		"role": "developer",
+		"content": []any{
+			map[string]any{
+				"type": "input_text",
+				"text": text,
+			},
+		},
+	}
+}
+
 // applyCodexOAuthInstructionsAsDeveloper moves top-level instructions into the
 // leading developer message in input (after leading additional_tools) and
 // removes the top-level field; blank or non-string instructions are deleted.
@@ -1452,8 +1468,7 @@ func applyCodexOAuthInstructionsAsDeveloper(reqBody map[string]any) bool {
 	if at < len(input) && isCodexLeadingDeveloperMessage(input[at]) {
 		return false
 	}
-	developer := map[string]any{"type": "message", "role": "developer", "content": text}
-	reqBody["input"] = slices.Insert(input, at, any(developer))
+	reqBody["input"] = slices.Insert(input, at, any(newCodexDeveloperInstructionsMessage(text)))
 	delete(reqBody, "instructions")
 	return true
 }
@@ -1468,8 +1483,7 @@ func prependCodexOAuthInstructionsAsDeveloper(reqBody map[string]any) bool {
 	if !shouldInsert {
 		return deletedEmpty
 	}
-	developer := map[string]any{"type": "message", "role": "developer", "content": text}
-	reqBody["input"] = slices.Insert(input, at, any(developer))
+	reqBody["input"] = slices.Insert(input, at, any(newCodexDeveloperInstructionsMessage(text)))
 	delete(reqBody, "instructions")
 	return true
 }
