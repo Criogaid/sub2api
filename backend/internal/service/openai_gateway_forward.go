@@ -411,7 +411,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
+	if instructionsEmpty && !hasCodexLeadingDeveloperPrefixInRawBody(body) && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
 		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
 	}
 	if billingModel != requestedModel {
@@ -525,31 +525,26 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
-		// Responses OAuth 与 Chat 兼容入口保持一致：纯文本 system 可以无损提升后删除，
-		// JSON object 模式仍需在 input 中保留 JSON 指令供上游兼容校验。
-		omitPromotedSystemMessages := !strings.EqualFold(
-			strings.TrimSpace(gjson.GetBytes(body, "text.format.type").String()),
-			"json_object",
-		)
 		codexResult := codexTransformResult{}
 		if compatMessagesBridge {
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
-				IsCodexCLI:                          isCodexCLI,
-				IsCompact:                           isCompactRequest,
-				SkipDefaultInstructions:             true,
-				PreserveToolCallIDs:                 true,
-				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
-				ResponsesLite:                       responsesLite,
+				IsCodexCLI:              isCodexCLI,
+				IsCompact:               isCompactRequest,
+				SkipDefaultInstructions: true,
+				PreserveToolCallIDs:     true,
+				ResponsesLite:           responsesLite,
 			})
-			ensureCodexOAuthInstructionsField(decoded)
+			applyCodexOAuthInstructionsAsDeveloper(decoded)
 			markDecodedModified()
 		} else {
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
-				IsCodexCLI:                          isCodexCLI,
-				IsCompact:                           isCompactRequest,
-				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
-				ResponsesLite:                       responsesLite,
+				IsCodexCLI:    isCodexCLI,
+				IsCompact:     isCompactRequest,
+				ResponsesLite: responsesLite,
 			})
+			if applyCodexOAuthInstructionsAsDeveloper(decoded) {
+				markDecodedModified()
+			}
 		}
 		if codexResult.Error != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "message": codexResult.Error.Error()}})

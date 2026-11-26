@@ -263,16 +263,21 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if strings.TrimSpace(existingInstructions) == "" {
 			existingInstructions = extractPromptLikeInstructionsFromInput(reqBody)
 		}
-		if _, err := applyForcedCodexInstructionsTemplate(reqBody, forcedTemplateText, forcedCodexInstructionsTemplateData{
+		forcedApplied, err := applyForcedCodexInstructionsTemplate(reqBody, forcedTemplateText, forcedCodexInstructionsTemplateData{
 			ExistingInstructions: strings.TrimSpace(existingInstructions),
 			OriginalModel:        originalModel,
 			NormalizedModel:      normalizedModel,
 			BillingModel:         billingModel,
 			UpstreamModel:        templateUpstreamModel,
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, err
 		}
-		ensureCodexOAuthInstructionsField(reqBody)
+		if forcedApplied {
+			prependCodexOAuthInstructionsAsDeveloper(reqBody)
+		} else {
+			applyCodexOAuthInstructionsAsDeveloper(reqBody)
+		}
 		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
 			appendOpenAICompatClaudeCodeTodoGuardToRequestBody(reqBody)
 		}
@@ -585,19 +590,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	stampOpenAIResponsesUpstreamEndpoint(c, result)
 	return result, handleErr
-}
-
-func ensureCodexOAuthInstructionsField(reqBody map[string]any) {
-	if reqBody == nil {
-		return
-	}
-	if value, ok := reqBody["instructions"]; !ok || value == nil {
-		reqBody["instructions"] = ""
-		return
-	}
-	if _, ok := reqBody["instructions"].(string); !ok {
-		reqBody["instructions"] = ""
-	}
 }
 
 // handleAnthropicErrorResponse reads an upstream error and returns it in

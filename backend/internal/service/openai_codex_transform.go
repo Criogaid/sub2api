@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -96,11 +97,10 @@ type codexTransformResult struct {
 }
 
 type codexOAuthTransformOptions struct {
-	IsCodexCLI                          bool
-	IsCompact                           bool
-	SkipDefaultInstructions             bool
-	PreserveToolCallIDs                 bool
-	OmitPromotedSystemMessagesFromInput bool
+	IsCodexCLI              bool
+	IsCompact               bool
+	SkipDefaultInstructions bool
+	PreserveToolCallIDs     bool
 	// ResponsesLite selects where an injected hosted tool is declared.
 	ResponsesLite bool
 }
@@ -301,17 +301,16 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		}
 	}
 
-	// ChatGPT internal Codex endpoint does not accept role:"system".
-	// Mirror its text into instructions because Codex OAuth requires it. Some
-	// callers must also keep the guidance in input as developer (notably
-	// Responses JSON object mode), while Chat Completions compatibility can
-	// omit text-only messages after promoting them losslessly.
-	if extractSystemMessagesFromInput(reqBody, opts.OmitPromotedSystemMessagesFromInput) {
+	// ChatGPT internal Codex endpoint does not accept role:"system". Rewrite
+	// system items to role:"developer" in place so they stay in the cacheable
+	// input prefix without duplicating text into top-level instructions.
+	if normalizeCodexSystemMessagesToDeveloper(reqBody) {
 		result.Modified = true
 	}
 
-	// instructions 处理逻辑：根据是否是 Codex CLI 分别调用不同方法
-	if !opts.SkipDefaultInstructions && applyInstructions(reqBody, opts.IsCodexCLI) {
+	// Only synthesize default Codex instructions when the request has neither
+	// explicit instructions nor a leading developer prefix.
+	if !opts.SkipDefaultInstructions && !hasCodexLeadingDeveloperPrefix(reqBody) && applyInstructions(reqBody, opts.IsCodexCLI) {
 		result.Modified = true
 	}
 	if isCodexSparkModel(normalizedModel) && applyCodexSparkImageUnsupportedInstructions(reqBody) {
@@ -340,20 +339,7 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		reqBody["input"] = input
 		result.Modified = true
 	} else if inputStr, ok := reqBody["input"].(string); ok {
-		// ChatGPT codex endpoint requires input to be a list, not a string.
-		// Convert string input to the expected message array format.
-		trimmed := strings.TrimSpace(inputStr)
-		if trimmed != "" {
-			reqBody["input"] = []any{
-				map[string]any{
-					"type":    "message",
-					"role":    "user",
-					"content": inputStr,
-				},
-			}
-		} else {
-			reqBody["input"] = []any{}
-		}
+		reqBody["input"] = codexInputItemsFromString(inputStr)
 		result.Modified = true
 	}
 
@@ -1321,88 +1307,171 @@ func extractTextFromContent(content any) string {
 	}
 }
 
-// extractSystemMessagesFromInput scans input for role=="system" and mirrors
-// their text into reqBody["instructions"]. By default it maps those items to
-// developer so Responses JSON mode can still see JSON instructions in input.
-// When omitPromoted is true, text-only items are removed after their content is
-// losslessly promoted; mixed or malformed content is retained as developer.
-func extractSystemMessagesFromInput(reqBody map[string]any, omitPromoted bool) bool {
+// normalizeCodexSystemMessagesToDeveloper rewrites role:"system" input items
+// to role:"developer" in place so Codex endpoints accept them without copying
+// system text into top-level instructions.
+func normalizeCodexSystemMessagesToDeveloper(reqBody map[string]any) bool {
 	input, ok := reqBody["input"].([]any)
 	if !ok || len(input) == 0 {
 		return false
 	}
 
-	var systemTexts []string
-	filteredInput := make([]any, 0, len(input))
 	modified := false
 	for _, item := range input {
 		m, ok := item.(map[string]any)
 		if !ok || m["role"] != "system" {
-			filteredInput = append(filteredInput, item)
 			continue
 		}
-
-		if omitPromoted {
-			if losslessText, lossless := extractLosslessTextFromContent(m["content"]); lossless {
-				if losslessText != "" {
-					systemTexts = append(systemTexts, losslessText)
-				}
-				modified = true
-				continue
-			}
-		}
-
-		if text := extractTextFromContent(m["content"]); text != "" {
-			systemTexts = append(systemTexts, text)
-		}
 		m["role"] = "developer"
-		filteredInput = append(filteredInput, item)
 		modified = true
 	}
-	if omitPromoted && len(filteredInput) != len(input) {
-		reqBody["input"] = filteredInput
-	}
+	return modified
+}
 
-	if len(systemTexts) == 0 {
-		return modified
+// codexLeadingDeveloperInsertIndex returns the insertion index immediately
+// after any leading Responses Lite additional_tools declarations.
+func codexLeadingDeveloperInsertIndex(input []any) int {
+	at := 0
+	for at < len(input) {
+		item, _ := input[at].(map[string]any)
+		if item["type"] != "additional_tools" {
+			break
+		}
+		at++
 	}
+	return at
+}
 
-	extracted := strings.Join(systemTexts, "\n\n")
-	if existing, ok := reqBody["instructions"].(string); ok && strings.TrimSpace(existing) != "" {
-		reqBody["instructions"] = extracted + "\n\n" + existing
-	} else {
-		reqBody["instructions"] = extracted
+func isCodexLeadingDeveloperMessage(item any) bool {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return false
 	}
+	itemType, _ := m["type"].(string)
+	if itemType != "" && itemType != "message" {
+		return false
+	}
+	role, _ := m["role"].(string)
+	if role != "developer" && role != "system" {
+		return false
+	}
+	return strings.TrimSpace(extractTextFromContent(m["content"])) != ""
+}
+
+// hasCodexLeadingDeveloperPrefix reports whether reqBody["input"] starts with a
+// non-blank developer (or system) message after any leading additional_tools.
+func hasCodexLeadingDeveloperPrefix(reqBody map[string]any) bool {
+	input, ok := reqBody["input"].([]any)
+	if !ok {
+		return false
+	}
+	at := codexLeadingDeveloperInsertIndex(input)
+	return at < len(input) && isCodexLeadingDeveloperMessage(input[at])
+}
+
+// hasCodexLeadingDeveloperPrefixInRawBody mirrors hasCodexLeadingDeveloperPrefix
+// on raw JSON before decoding, including the legacy top-level "prompt" alias.
+func hasCodexLeadingDeveloperPrefixInRawBody(body []byte) bool {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || input.Type == gjson.Null {
+		input = gjson.GetBytes(body, "prompt")
+	}
+	if !input.IsArray() {
+		return false
+	}
+	found := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		itemType := item.Get("type").String()
+		if itemType == "additional_tools" {
+			return true
+		}
+		if itemType != "" && itemType != "message" {
+			return false
+		}
+		role := item.Get("role").String()
+		if role != "developer" && role != "system" {
+			return false
+		}
+		content := item.Get("content")
+		switch {
+		case content.Type == gjson.String:
+			found = strings.TrimSpace(content.String()) != ""
+		case content.IsArray():
+			content.ForEach(func(_, part gjson.Result) bool {
+				text := part.Get("text")
+				if text.Type == gjson.String && strings.TrimSpace(text.String()) != "" {
+					found = true
+					return false
+				}
+				return true
+			})
+		}
+		return false
+	})
+	return found
+}
+
+// prepareCodexOAuthInstructionsMigration handles empty top-level instructions
+// (deleting them) and resolves the target input slice for a non-empty string.
+// Returns (text, input, at, shouldInsert, deletedEmpty).
+func prepareCodexOAuthInstructionsMigration(reqBody map[string]any) (string, []any, int, bool, bool) {
+	value, exists := reqBody["instructions"]
+	if !exists {
+		return "", nil, 0, false, false
+	}
+	text, _ := value.(string)
+	if strings.TrimSpace(text) == "" {
+		delete(reqBody, "instructions")
+		return "", nil, 0, false, true
+	}
+	var input []any
+	switch v := reqBody["input"].(type) {
+	case nil:
+	case []any:
+		input = v
+	case string:
+		input = codexInputItemsFromString(v)
+	default:
+		return "", nil, 0, false, false
+	}
+	return text, input, codexLeadingDeveloperInsertIndex(input), true, false
+}
+
+// applyCodexOAuthInstructionsAsDeveloper moves top-level instructions into the
+// leading developer message in input (after leading additional_tools) and
+// removes the top-level field; blank or non-string instructions are deleted.
+// When input already starts with a non-blank developer message, explicit
+// top-level instructions are preserved as turn-scoped directives so they do not
+// invalidate the cached prefix on GPT-6.2+. Uninsertable input shapes (such as
+// an object) also preserve top-level instructions.
+func applyCodexOAuthInstructionsAsDeveloper(reqBody map[string]any) bool {
+	text, input, at, shouldInsert, deletedEmpty := prepareCodexOAuthInstructionsMigration(reqBody)
+	if !shouldInsert {
+		return deletedEmpty
+	}
+	if at < len(input) && isCodexLeadingDeveloperMessage(input[at]) {
+		return false
+	}
+	developer := map[string]any{"type": "message", "role": "developer", "content": text}
+	reqBody["input"] = slices.Insert(input, at, any(developer))
+	delete(reqBody, "instructions")
 	return true
 }
 
-// extractLosslessTextFromContent returns text only when the entire content can
-// be represented by an instructions string without dropping non-text parts.
-func extractLosslessTextFromContent(content any) (string, bool) {
-	switch v := content.(type) {
-	case string:
-		return v, true
-	case []any:
-		var b strings.Builder
-		for _, part := range v {
-			m, ok := part.(map[string]any)
-			if !ok {
-				return "", false
-			}
-			typeName, ok := m["type"].(string)
-			if !ok || (typeName != "text" && typeName != "input_text" && typeName != "output_text") {
-				return "", false
-			}
-			text, ok := m["text"].(string)
-			if !ok {
-				return "", false
-			}
-			_, _ = b.WriteString(text)
-		}
-		return b.String(), true
-	default:
-		return "", false
+// prependCodexOAuthInstructionsAsDeveloper unconditionally moves top-level
+// instructions into the leading developer message (after leading
+// additional_tools). Used for server-configured static templates such as
+// ForcedCodexInstructionsTemplate that must reside in the cacheable prefix
+// even when the converted request already contains a client developer message.
+func prependCodexOAuthInstructionsAsDeveloper(reqBody map[string]any) bool {
+	text, input, at, shouldInsert, deletedEmpty := prepareCodexOAuthInstructionsMigration(reqBody)
+	if !shouldInsert {
+		return deletedEmpty
 	}
+	developer := map[string]any{"type": "message", "role": "developer", "content": text}
+	reqBody["input"] = slices.Insert(input, at, any(developer))
+	delete(reqBody, "instructions")
+	return true
 }
 
 func extractPromptLikeInstructionsFromInput(reqBody map[string]any) string {
@@ -1505,6 +1574,14 @@ func applyCodexClientMetadata(reqBody map[string]any, account *Account) bool {
 	default:
 		return false
 	}
+}
+
+// codexInputItemsFromString 把字符串 input 转成 ChatGPT Codex 端点要求的消息数组。
+func codexInputItemsFromString(input string) []any {
+	if strings.TrimSpace(input) == "" {
+		return []any{}
+	}
+	return []any{map[string]any{"type": "message", "role": "user", "content": input}}
 }
 
 // applyInstructions 处理 instructions 字段：仅在 instructions 为空时填充默认值。

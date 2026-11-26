@@ -305,19 +305,15 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
 		}
-		isJSONObjectFormat := strings.EqualFold(strings.TrimSpace(gjson.GetBytes(responsesBody, "text.format.type").String()), "json_object")
 		codexResult := applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
-			SkipDefaultInstructions:             !isResponsesShape,
-			OmitPromotedSystemMessagesFromInput: !isResponsesShape && !isJSONObjectFormat,
+			SkipDefaultInstructions: !isResponsesShape,
 		})
 		if codexResult.Error != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "message": codexResult.Error.Error()}})
 			return nil, codexResult.Error
 		}
 		setCodexToolNameReverse(c, codexResult.ToolNameReverse)
-		if !isResponsesShape {
-			ensureCodexOAuthInstructionsField(reqBody)
-		}
+		applyCodexOAuthInstructionsAsDeveloper(reqBody)
 		if codexResult.NormalizedModel != "" {
 			upstreamModel = codexResult.NormalizedModel
 		}
