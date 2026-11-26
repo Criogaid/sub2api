@@ -1373,9 +1373,10 @@ func hasCodexLeadingDeveloperPrefix(reqBody map[string]any) bool {
 // hasCodexLeadingDeveloperPrefixInRawBody mirrors hasCodexLeadingDeveloperPrefix
 // on raw JSON before decoding, including the legacy top-level "prompt" alias.
 func hasCodexLeadingDeveloperPrefixInRawBody(body []byte) bool {
-	input := gjson.GetBytes(body, "input")
+	view := parseRawJSONView(body)
+	input := view.Get("input")
 	if !input.Exists() || input.Type == gjson.Null {
-		input = gjson.GetBytes(body, "prompt")
+		input = view.Get("prompt")
 	}
 	if !input.IsArray() {
 		return false

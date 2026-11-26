@@ -411,7 +411,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && (isCompactRequest || !hasCodexLeadingDeveloperPrefixInRawBody(body)) && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
+	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses && (isCompactRequest || !hasCodexLeadingDeveloperPrefixInRawBody(body)) {
 		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
 	}
 	if billingModel != requestedModel {
