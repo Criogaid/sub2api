@@ -302,9 +302,7 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 	}
 
 	if opts.IsCompact {
-		if promoteCompactSystemInstructions(reqBody) {
-			result.Modified = true
-		}
+		promoteCompactSystemInstructions(reqBody)
 	} else if normalizeCodexSystemMessagesToDeveloper(reqBody) {
 		result.Modified = true
 	}
@@ -1310,7 +1308,7 @@ func extractTextFromContent(content any) (text string, textOnly bool) {
 
 // Legacy compact reads system guidance from top-level instructions. Mixed
 // content and JSON-mode guidance must also remain in the input history.
-func promoteCompactSystemInstructions(reqBody map[string]any) bool {
+func promoteCompactSystemInstructions(reqBody map[string]any) {
 	input, _ := reqBody["input"].([]any)
 	textConfig, _ := reqBody["text"].(map[string]any)
 	format, _ := textConfig["format"].(map[string]any)
@@ -1318,14 +1316,12 @@ func promoteCompactSystemInstructions(reqBody map[string]any) bool {
 	keepTextItems := strings.EqualFold(strings.TrimSpace(formatType), "json_object")
 	var instructions []string
 	kept := input[:0]
-	modified := false
 	for _, item := range input {
 		message, _ := item.(map[string]any)
 		if message["role"] != "system" {
 			kept = append(kept, item)
 			continue
 		}
-		modified = true
 		text, textOnly := extractTextFromContent(message["content"])
 		if text != "" {
 			instructions = append(instructions, text)
@@ -1341,13 +1337,12 @@ func promoteCompactSystemInstructions(reqBody map[string]any) bool {
 		reqBody["input"] = kept
 	}
 	if len(instructions) == 0 {
-		return modified
+		return
 	}
 	if existing, _ := reqBody["instructions"].(string); strings.TrimSpace(existing) != "" {
 		instructions = append(instructions, existing)
 	}
 	reqBody["instructions"] = strings.Join(instructions, "\n\n")
-	return true
 }
 
 // normalizeCodexSystemMessagesToDeveloper rewrites role:"system" input items
