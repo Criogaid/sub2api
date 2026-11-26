@@ -186,6 +186,13 @@ func applyCodexOAuthTransform(reqBody map[string]any, isCodexCLI bool, isCompact
 
 func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuthTransformOptions) codexTransformResult {
 	result := codexTransformResult{}
+	// Read Codex classification before stripping its internal message metadata.
+	if !opts.SkipDefaultInstructions && !opts.IsCompact {
+		model, _ := reqBody["model"].(string)
+		if applyCodexDefaultInstructions(reqBody, model, false) {
+			result.Modified = true
+		}
+	}
 	if normalizeOpenAIOAuthResponsesCompatibilityFields(reqBody) {
 		result.Modified = true
 	}
@@ -307,10 +314,7 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		result.Modified = true
 	}
 
-	// Only synthesize default Codex instructions when the request has neither
-	// explicit instructions nor a leading developer prefix (compact requests
-	// keep top-level instructions for legacy endpoint compatibility).
-	if !opts.SkipDefaultInstructions && (opts.IsCompact || !hasCodexLeadingDeveloperPrefix(reqBody)) && applyInstructions(reqBody, opts.IsCodexCLI) {
+	if opts.IsCompact && !opts.SkipDefaultInstructions && applyCodexDefaultInstructions(reqBody, normalizedModel, true) {
 		result.Modified = true
 	}
 	if isCodexSparkModel(normalizedModel) && applyCodexSparkImageUnsupportedInstructions(reqBody) {
@@ -1380,75 +1384,38 @@ func codexLeadingDeveloperInsertIndex(input []any) int {
 	return at
 }
 
-func isCodexLeadingDeveloperMessage(item any) bool {
-	m, ok := item.(map[string]any)
-	if !ok {
-		return false
-	}
+func isCodexDeveloperMessage(m map[string]any) bool {
 	itemType, _ := m["type"].(string)
 	if itemType != "" && itemType != "message" {
 		return false
 	}
 	role, _ := m["role"].(string)
-	if role != "developer" && role != "system" {
+	return role == "developer" || role == "system"
+}
+
+func isCodexLeadingDeveloperMessage(item any) bool {
+	m, _ := item.(map[string]any)
+	if !isCodexDeveloperMessage(m) {
 		return false
 	}
 	text, _ := extractTextFromContent(m["content"])
 	return strings.TrimSpace(text) != ""
 }
 
-// hasCodexLeadingDeveloperPrefix reports whether reqBody["input"] starts with a
-// non-blank developer (or system) message after any leading additional_tools.
-func hasCodexLeadingDeveloperPrefix(reqBody map[string]any) bool {
-	input, ok := reqBody["input"].([]any)
-	if !ok {
+// Codex identifies a custom base prompt with a dedicated, single input_text item.
+func isCodexClassifiedBaseMessage(m map[string]any) bool {
+	meta, _ := m["internal_chat_message_metadata_passthrough"].(map[string]any)
+	kinds, _ := meta["content_item_kinds"].([]any)
+	if m["role"] != "developer" || len(kinds) != 1 || kinds[0] != "model.base_instructions" {
 		return false
 	}
-	at := codexLeadingDeveloperInsertIndex(input)
-	return at < len(input) && isCodexLeadingDeveloperMessage(input[at])
-}
-
-// hasCodexLeadingDeveloperPrefixInRawBody mirrors hasCodexLeadingDeveloperPrefix
-// on raw JSON before decoding, including the legacy top-level "prompt" alias.
-func hasCodexLeadingDeveloperPrefixInRawBody(body []byte) bool {
-	view := parseRawJSONView(body)
-	input := view.Get("input")
-	if !input.Exists() || input.Type == gjson.Null {
-		input = view.Get("prompt")
-	}
-	if !input.IsArray() {
+	parts, _ := m["content"].([]any)
+	if len(parts) != 1 {
 		return false
 	}
-	found := false
-	input.ForEach(func(_, item gjson.Result) bool {
-		itemType := item.Get("type").String()
-		if itemType == "additional_tools" {
-			return true
-		}
-		if itemType != "" && itemType != "message" {
-			return false
-		}
-		role := item.Get("role").String()
-		if role != "developer" && role != "system" {
-			return false
-		}
-		content := item.Get("content")
-		switch {
-		case content.Type == gjson.String:
-			found = strings.TrimSpace(content.String()) != ""
-		case content.IsArray():
-			content.ForEach(func(_, part gjson.Result) bool {
-				text := part.Get("text")
-				if text.Type == gjson.String && strings.TrimSpace(text.String()) != "" {
-					found = true
-					return false
-				}
-				return true
-			})
-		}
-		return false
-	})
-	return found
+	part, _ := parts[0].(map[string]any)
+	text, _ := part["text"].(string)
+	return part["type"] == "input_text" && strings.TrimSpace(text) != ""
 }
 
 // prepareCodexOAuthInstructionsMigration handles empty top-level instructions
@@ -1638,13 +1605,36 @@ func codexInputItemsFromString(input string) []any {
 	return []any{map[string]any{"type": "message", "role": "user", "content": input}}
 }
 
-// applyInstructions 处理 instructions 字段：仅在 instructions 为空时填充默认值。
-func applyInstructions(reqBody map[string]any, isCodexCLI bool) bool {
+// A developer role alone says nothing about whether the model base is present.
+func applyCodexDefaultInstructions(reqBody map[string]any, model string, compact bool) bool {
 	if !isInstructionsEmpty(reqBody) {
 		return false
 	}
-	model, _ := reqBody["model"].(string)
-	reqBody["instructions"] = defaultCodexSynthInstructions(model)
+	base := defaultCodexSynthInstructions(model)
+	if !compact {
+		raw := reqBody["input"]
+		if raw == nil {
+			raw = reqBody["prompt"]
+		}
+		input, _ := raw.([]any)
+		at := codexLeadingDeveloperInsertIndex(input)
+		for i := at; i < len(input); i++ {
+			message, _ := input[i].(map[string]any)
+			if !isCodexDeveloperMessage(message) {
+				break
+			}
+			text, textOnly := extractTextFromContent(message["content"])
+			if (textOnly && strings.TrimSpace(text) == base) || isCodexClassifiedBaseMessage(message) {
+				return false
+			}
+		}
+		if at < len(input) && isCodexLeadingDeveloperMessage(input[at]) {
+			reqBody["input"] = slices.Insert(input, at, any(newCodexDeveloperInstructionsMessage(base)))
+			delete(reqBody, "instructions")
+			return true
+		}
+	}
+	reqBody["instructions"] = base
 	return true
 }
 

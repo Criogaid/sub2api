@@ -990,6 +990,10 @@ func TestOpenAIGatewayService_Forward_PreservesLeadingDeveloperPrefix(t *testing
 		tools    = `{"type":"additional_tools","role":"developer","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`
 		user     = `{"type":"message","role":"user","content":"hi"}`
 	)
+	baseText, err := json.Marshal(" \n" + defaultCodexSynthInstructions("gpt-6.2-sol") + "\t ")
+	require.NoError(t, err)
+	base := `{"type":"message","role":"developer","content":[{"type":"input_text","text":` + string(baseText) + `}]}`
+	metadata := `,"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}`
 	for _, tc := range []struct {
 		name             string
 		userAgent        string
@@ -1000,20 +1004,23 @@ func TestOpenAIGatewayService_Forward_PreservesLeadingDeveloperPrefix(t *testing
 		input            string
 		instructions     string
 		wantDefault      bool
+		defaultIndex     int
+		alias            bool
 		wantTopLevelInst string
 	}{
 		{
-			name: "codex_0_171_array_prefix_skips_default", userAgent: "codex-tui/0.171.0",
-			model: "gpt-6.2-sol", input: devArr + "," + user,
+			name: "codex_array_business_prefix_gets_default", userAgent: "codex-tui/0.171.0",
+			model: "gpt-6.2-sol", input: devArr + "," + user, wantDefault: true,
 		},
 		{
 			name: "responses_lite_after_additional_tools_with_mapping_and_blank_instructions", userAgent: "codex-tui/0.171.0",
 			lite: true, model: "gpt-6.2-astra", mappedModel: "gpt-6.2-sol",
 			input: tools + "," + devArr + "," + user, instructions: `,"instructions":" "`,
+			wantDefault: true, defaultIndex: 1,
 		},
 		{
-			name: "non_codex_string_developer_prefix_skips_default", userAgent: "OpenAI/Python 2.8.0",
-			model: "gpt-6.2-sol", input: devStr + "," + user,
+			name: "non_codex_string_business_prefix_gets_default", userAgent: "OpenAI/Python 2.8.0",
+			model: "gpt-6.2-sol", input: devStr + "," + user, wantDefault: true,
 		},
 		{
 			name: "explicit_turn_scoped_instructions_preserved_at_top_level", userAgent: "codex-tui/0.171.0",
@@ -1022,8 +1029,44 @@ func TestOpenAIGatewayService_Forward_PreservesLeadingDeveloperPrefix(t *testing
 		},
 		{
 			name: "image_bridge_keeps_turn_scoped_directive_at_top_level_and_echoes_null", userAgent: "codex_cli_rs/0.171.0",
-			bridge: true, model: "gpt-6.2-sol", input: devArr + "," + user,
+			bridge: true, model: "gpt-6.2-sol", input: devArr + "," + user, wantDefault: true,
 			wantTopLevelInst: codexImageGenerationBridgeText,
+		},
+		{
+			name: "mapped_system_after_tools_preserves_history", model: "gpt-6.2-astra", mappedModel: "gpt-6.2-sol",
+			input: tools + `,{"role":"system","content":"Project rules"},` + devArr + "," + user, wantDefault: true, defaultIndex: 1,
+		},
+		{
+			name: "legacy_prompt_array_business_rules", model: "gpt-6.2-sol", alias: true,
+			input: tools + "," + devArr + "," + user, wantDefault: true, defaultIndex: 1,
+		},
+		{
+			name: "mapped_full_base_with_whitespace_skips_default", model: "gpt-6.2-astra", mappedModel: "gpt-6.2-sol",
+			input: tools + "," + base + "," + devArr + "," + user,
+		},
+		{
+			name: "full base after business rule is not duplicated", model: "gpt-6.2-sol",
+			input: devArr + "," + base + "," + user,
+		},
+		{
+			name: "official_metadata_skips_default_and_is_removed", model: "gpt-6.2-sol",
+			input: tools + "," + strings.TrimSuffix(devArr, "}") + metadata + "}," + user,
+		},
+		{
+			name: "metadata_on_string_content_does_not_mark_base", model: "gpt-6.2-sol",
+			input: strings.TrimSuffix(devStr, "}") + metadata + "}," + user, wantDefault: true,
+		},
+		{
+			name: "metadata_on_system_does_not_mark_base", model: "gpt-6.2-sol",
+			input: `{"role":"system","content":[{"type":"input_text","text":"rules"}]` + metadata + "}," + user, wantDefault: true,
+		},
+		{
+			name: "metadata_on_multiple_content_items_does_not_mark_base", model: "gpt-6.2-sol",
+			input: `{"role":"developer","content":[{"type":"input_text","text":"rules"},{"type":"input_text","text":"more"}]` + metadata + "}," + user, wantDefault: true,
+		},
+		{
+			name: "partial_base_is_business_rules", model: "gpt-6.2-sol",
+			input: `{"role":"developer","content":"You are Codex"},` + user, wantDefault: true,
 		},
 		{
 			name: "blank_developer_falls_back_to_default", userAgent: "codex-tui/0.171.0",
@@ -1035,7 +1078,11 @@ func TestOpenAIGatewayService_Forward_PreservesLeadingDeveloperPrefix(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := `{"model":"` + tc.model + `","stream":true,"input":[` + tc.input + `]` + tc.instructions + `}`
+			inputKey := "input"
+			if tc.alias {
+				inputKey = "prompt"
+			}
+			body := `{"model":"` + tc.model + `","stream":true,"` + inputKey + `":[` + tc.input + `]` + tc.instructions + `}`
 			wantModel := tc.model
 			account := instructionsEchoOAuthAccount(false)
 			if tc.mappedModel != "" {
@@ -1066,16 +1113,30 @@ func TestOpenAIGatewayService_Forward_PreservesLeadingDeveloperPrefix(t *testing
 			require.NotNil(t, result)
 			require.Equal(t, wantModel, gjson.GetBytes(upstream.lastBody, "model").String())
 
+			items := gjson.GetBytes(upstream.lastBody, "input").Array()
 			if tc.wantDefault {
-				requireCodexDeveloperInstructions(t, upstream.lastBody, 0, defaultCodexSynthInstructions(wantModel))
-				return
+				require.Greater(t, len(items), tc.defaultIndex)
+				item := items[tc.defaultIndex]
+				require.Equal(t, "message", item.Get("type").String())
+				require.Equal(t, "developer", item.Get("role").String())
+				require.Len(t, item.Get("content").Array(), 1)
+				require.Equal(t, "input_text", item.Get("content.0.type").String())
+				require.Equal(t, defaultCodexSynthInstructions(wantModel), item.Get("content.0.text").String())
+				items = append(items[:tc.defaultIndex:tc.defaultIndex], items[tc.defaultIndex+1:]...)
 			}
 			if tc.wantTopLevelInst != "" {
 				require.Equal(t, tc.wantTopLevelInst, gjson.GetBytes(upstream.lastBody, "instructions").String())
 			} else {
 				require.False(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
 			}
-			require.JSONEq(t, gjson.Get(body, "input").Raw, gjson.GetBytes(upstream.lastBody, "input").Raw)
+			original := gjson.Get(body, inputKey).Array()
+			require.Len(t, items, len(original))
+			for i := range original {
+				want := strings.Replace(original[i].Raw, metadata, "", 1)
+				want = strings.Replace(want, `"role":"system"`, `"role":"developer"`, 1)
+				require.JSONEq(t, want, items[i].Raw)
+			}
+			require.False(t, gjson.GetBytes(upstream.lastBody, "prompt").Exists())
 			if tc.bridge {
 				require.Equal(t, gjson.Null, sseResponseInstructions(t, rec.Body.String(), "response.completed").Type)
 			} else if tc.wantTopLevelInst != "" {

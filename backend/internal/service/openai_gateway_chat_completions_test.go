@@ -940,6 +940,7 @@ func forwardOAuthChatCompletionsForUpstreamBody(t *testing.T, body []byte) []byt
 		Credentials: map[string]any{
 			"access_token":       "oauth-token",
 			"chatgpt_account_id": "chatgpt-acc",
+			"model_mapping":      map[string]any{"client-model": "gpt-6.2-sol"},
 		},
 	}
 
@@ -950,7 +951,7 @@ func forwardOAuthChatCompletionsForUpstreamBody(t *testing.T, body []byte) []byt
 	return upstream.lastBody
 }
 
-func TestForwardAsChatCompletions_OAuthMovesResponsesShapeInstructionsToDeveloperInput(t *testing.T) {
+func TestForwardAsChatCompletions_OAuthResponsesShapeInstructions(t *testing.T) {
 	t.Run("explicit instructions with array input", func(t *testing.T) {
 		const instructions = "Client Responses instructions."
 		body := []byte(`{"model":"gpt-5.4","instructions":"` + instructions + `","input":[{"type":"message","role":"user","content":"hello"}],"stream":false}`)
@@ -972,6 +973,20 @@ func TestForwardAsChatCompletions_OAuthMovesResponsesShapeInstructionsToDevelope
 		require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
 		require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
 		require.Equal(t, "hello", gjson.GetBytes(upstreamBody, "input.1.content").String())
+	})
+
+	t.Run("missing instructions with business developer uses mapped model default", func(t *testing.T) {
+		body := []byte(`{"model":"client-model","input":[{"type":"message","role":"developer","content":"Business rules."},{"type":"message","role":"user","content":"hello"}],"stream":false}`)
+
+		upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+		require.Equal(t, "gpt-6.2-sol", gjson.GetBytes(upstreamBody, "model").String())
+		requireCodexDeveloperInstructions(t, upstreamBody, 0, defaultCodexSynthInstructions("gpt-6.2-sol"))
+		require.Equal(t, int64(3), gjson.GetBytes(upstreamBody, "input.#").Int())
+		require.Equal(t, "developer", gjson.GetBytes(upstreamBody, "input.1.role").String())
+		require.Equal(t, "Business rules.", gjson.GetBytes(upstreamBody, "input.1.content").String())
+		require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.2.role").String())
+		require.Equal(t, "hello", gjson.GetBytes(upstreamBody, "input.2.content").String())
 	})
 
 	t.Run("leading developer prefix skips default and preserves turn-scoped instructions", func(t *testing.T) {

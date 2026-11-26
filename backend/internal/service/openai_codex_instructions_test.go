@@ -182,26 +182,3 @@ func TestPrependCodexOAuthInstructionsAsDeveloper(t *testing.T) {
 	require.Equal(t, "client system", gjson.GetBytes(got, "input.2.content.0.text").String())
 	require.Equal(t, "user", gjson.GetBytes(got, "input.3.role").String())
 }
-
-func TestHasCodexLeadingDeveloperPrefixInRawBody(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		body string
-		want bool
-	}{
-		{name: "string developer", body: `{"input":[{"role":"developer","content":"rules"},{"role":"user","content":"hi"}]}`, want: true},
-		{name: "array input_text developer", body: `{"input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]},{"role":"user","content":"hi"}]}`, want: true},
-		{name: "after additional_tools", body: `{"input":[{"type":"additional_tools","tools":[]},{"type":"message","role":"developer","content":"rules"}]}`, want: true},
-		{name: "leading system message", body: `{"input":[{"role":"system","content":"rules"},{"role":"user","content":"hi"}]}`, want: true},
-		{name: "legacy prompt alias", body: `{"prompt":[{"role":"developer","content":"rules"}]}`, want: true},
-		{name: "blank developer", body: `{"input":[{"role":"developer","content":"  \t"},{"role":"user","content":"hi"}]}`, want: false},
-		{name: "blank array developer", body: `{"input":[{"role":"developer","content":[{"type":"input_text","text":" "}]}]}`, want: false},
-		{name: "late developer", body: `{"input":[{"role":"user","content":"hi"},{"role":"developer","content":"rules"}]}`, want: false},
-		{name: "non-message item", body: `{"input":[{"type":"function_call","role":"developer","content":"rules"}]}`, want: false},
-		{name: "string input", body: `{"input":"hello"}`, want: false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, hasCodexLeadingDeveloperPrefixInRawBody([]byte(tt.body)))
-		})
-	}
-}

@@ -409,11 +409,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamModel = compactModel
 		}
 	}
-	instructions := gjson.GetBytes(body, "instructions")
-	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses && (isCompactRequest || !hasCodexLeadingDeveloperPrefixInRawBody(body)) {
-		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
-	}
 	if billingModel != requestedModel {
 		logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Model mapping applied: %s -> %s (account: %s, isCodexCLI: %v)", requestedModel, billingModel, account.Name, isCodexCLI)
 	}
@@ -431,6 +426,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if strings.TrimSpace(gjson.GetBytes(body, "reasoning.effort").String()) == "minimal" {
 		markPatchSet("reasoning.effort", "none")
 		logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Normalized reasoning.effort: minimal -> none (account: %s)", account.Name)
+	}
+	// Resolve defaults before image directives are appended, using the mapped model.
+	defaultsHandled := account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses
+	if defaultsHandled {
+		decoded, decodeErr := ensureReqBody()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if applyCodexDefaultInstructions(decoded, upstreamModel, isCompactRequest) {
+			markDecodedModified()
+		}
 	}
 	if strings.TrimSpace(gjson.GetBytes(body, "text.format.type").String()) == "json_schema" ||
 		strings.TrimSpace(gjson.GetBytes(body, "response_format.type").String()) == "json_schema" {
@@ -542,9 +548,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			markDecodedModified()
 		} else {
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
-				IsCodexCLI:    isCodexCLI,
-				IsCompact:     isCompactRequest,
-				ResponsesLite: responsesLite,
+				IsCodexCLI:              isCodexCLI,
+				IsCompact:               isCompactRequest,
+				SkipDefaultInstructions: defaultsHandled,
+				ResponsesLite:           responsesLite,
 			})
 			if !isCompactRequest && applyCodexOAuthInstructionsAsDeveloper(decoded) {
 				markDecodedModified()
