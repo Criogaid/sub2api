@@ -60,6 +60,55 @@ func TestOpenAIGatewayService_Forward_CompactOnlyModelMappingOverridesOAuthUpstr
 	require.Equal(t, "gpt-5.4-openai-compact", opsModel)
 }
 
+func TestOpenAIGatewayService_Forward_CompactSystemInstructions(t *testing.T) {
+	const (
+		textOnly     = `{"role":"system","content":[{"type":"input_text","text":"compact "},{"type":"input_text","text":"JSON"}]}`
+		mixedContent = `[{"type":"input_text","text":"keep diagrams"},{"type":"input_image","image_url":"https://example.org/chart.png"}]`
+		user         = `{"role":"user","content":"summarize"}`
+	)
+	for _, tc := range []struct {
+		name, fields, input, wantInstructions, wantInput string
+	}{
+		{
+			name:             "promote text and retain mixed content",
+			fields:           `"instructions":"keep filenames",`,
+			input:            textOnly + `,{"role":"system","content":` + mixedContent + `},` + user,
+			wantInstructions: "compact JSON\n\nkeep diagrams\n\nkeep filenames",
+			wantInput:        `[{"role":"developer","content":` + mixedContent + `},` + user + `]`,
+		},
+		{
+			name:             "retain JSON mode guidance in history",
+			fields:           `"text":{"format":{"type":"json_object"}},"instructions":"keep filenames",`,
+			input:            textOnly + `,` + user,
+			wantInstructions: "compact JSON\n\nkeep filenames",
+			wantInput:        `[` + strings.Replace(textOnly, `"system"`, `"developer"`, 1) + `,` + user + `]`,
+		},
+		{
+			name:      "bridge keeps empty instructions",
+			fields:    `"prompt_cache_key":"anthropic-metadata-compact",`,
+			input:     user,
+			wantInput: `[` + user + `]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"model":"gpt-5.4",` + tc.fields + `"input":[` + tc.input + `]}`)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"id":"resp_compact","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			}}
+			svc := &OpenAIGatewayService{httpUpstream: upstream}
+			_, err := svc.Forward(context.Background(), c, instructionsEchoOAuthAccount(false), body)
+			require.NoError(t, err)
+			instructions := gjson.GetBytes(upstream.lastBody, "instructions")
+			require.Equal(t, gjson.String, instructions.Type)
+			require.Equal(t, tc.wantInstructions, instructions.String())
+			require.JSONEq(t, tc.wantInput, gjson.GetBytes(upstream.lastBody, "input").Raw)
+		})
+	}
+}
+
 func TestOpenAIGatewayService_Forward_APIKeyCompactSanitizesStatelessReplayAfterStoreWasDropped(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()

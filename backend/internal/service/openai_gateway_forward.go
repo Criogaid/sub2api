@@ -536,6 +536,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			})
 			if !isCompactRequest {
 				applyCodexOAuthInstructionsAsDeveloper(decoded)
+			} else if _, ok := decoded["instructions"].(string); !ok {
+				decoded["instructions"] = ""
 			}
 			markDecodedModified()
 		} else {

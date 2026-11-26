@@ -301,10 +301,11 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		}
 	}
 
-	// ChatGPT internal Codex endpoint does not accept role:"system". Rewrite
-	// system items to role:"developer" in place so they stay in the cacheable
-	// input prefix without duplicating text into top-level instructions.
-	if normalizeCodexSystemMessagesToDeveloper(reqBody) {
+	if opts.IsCompact {
+		if promoteCompactSystemInstructions(reqBody) {
+			result.Modified = true
+		}
+	} else if normalizeCodexSystemMessagesToDeveloper(reqBody) {
 		result.Modified = true
 	}
 
@@ -501,7 +502,7 @@ func normalizeCodexToolRoleMessages(input []any) ([]any, bool) {
 			continue
 		}
 
-		output := extractTextFromContent(m["content"])
+		output, _ := extractTextFromContent(m["content"])
 		if output == "" {
 			if value, ok := m["output"].(string); ok {
 				output = value
@@ -1282,30 +1283,71 @@ func getNormalizedCodexModel(modelID string) string {
 	return ""
 }
 
-// extractTextFromContent extracts plain text from a content value that is either
-// a Go string or a []any of text-like content-part maps.
-func extractTextFromContent(content any) string {
+// extractTextFromContent also reports whether text represents the entire content.
+func extractTextFromContent(content any) (text string, textOnly bool) {
 	switch v := content.(type) {
 	case string:
-		return v
+		return v, true
 	case []any:
 		var parts []string
+		textOnly = true
 		for _, part := range v {
-			m, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			switch t, _ := m["type"].(string); t {
+			m, _ := part.(map[string]any)
+			switch m["type"] {
 			case "text", "input_text", "output_text":
 				if text, ok := m["text"].(string); ok {
 					parts = append(parts, text)
+					continue
 				}
 			}
+			textOnly = false
 		}
-		return strings.Join(parts, "")
+		return strings.Join(parts, ""), textOnly
 	default:
-		return ""
+		return "", false
 	}
+}
+
+// Legacy compact reads system guidance from top-level instructions. Mixed
+// content and JSON-mode guidance must also remain in the input history.
+func promoteCompactSystemInstructions(reqBody map[string]any) bool {
+	input, _ := reqBody["input"].([]any)
+	textConfig, _ := reqBody["text"].(map[string]any)
+	format, _ := textConfig["format"].(map[string]any)
+	formatType, _ := format["type"].(string)
+	keepTextItems := strings.EqualFold(strings.TrimSpace(formatType), "json_object")
+	var instructions []string
+	kept := input[:0]
+	modified := false
+	for _, item := range input {
+		message, _ := item.(map[string]any)
+		if message["role"] != "system" {
+			kept = append(kept, item)
+			continue
+		}
+		modified = true
+		text, textOnly := extractTextFromContent(message["content"])
+		if text != "" {
+			instructions = append(instructions, text)
+		}
+		if textOnly && !keepTextItems {
+			continue
+		}
+		message["role"] = "developer"
+		kept = append(kept, item)
+	}
+	if len(kept) != len(input) {
+		clear(input[len(kept):])
+		reqBody["input"] = kept
+	}
+	if len(instructions) == 0 {
+		return modified
+	}
+	if existing, _ := reqBody["instructions"].(string); strings.TrimSpace(existing) != "" {
+		instructions = append(instructions, existing)
+	}
+	reqBody["instructions"] = strings.Join(instructions, "\n\n")
+	return true
 }
 
 // normalizeCodexSystemMessagesToDeveloper rewrites role:"system" input items
@@ -1356,7 +1398,8 @@ func isCodexLeadingDeveloperMessage(item any) bool {
 	if role != "developer" && role != "system" {
 		return false
 	}
-	return strings.TrimSpace(extractTextFromContent(m["content"])) != ""
+	text, _ := extractTextFromContent(m["content"])
+	return strings.TrimSpace(text) != ""
 }
 
 // hasCodexLeadingDeveloperPrefix reports whether reqBody["input"] starts with a
@@ -1503,7 +1546,8 @@ func extractPromptLikeInstructionsFromInput(reqBody map[string]any) string {
 		role, _ := m["role"].(string)
 		switch role {
 		case "developer", "system":
-			if text := strings.TrimSpace(extractTextFromContent(m["content"])); text != "" {
+			text, _ := extractTextFromContent(m["content"])
+			if text := strings.TrimSpace(text); text != "" {
 				texts = append(texts, text)
 			}
 		}
