@@ -65,6 +65,7 @@ func TestOpenAIGatewayService_Forward_CompactSystemInstructions(t *testing.T) {
 		textOnly     = `{"role":"system","content":[{"type":"input_text","text":"compact "},{"type":"input_text","text":"JSON"}]}`
 		mixedContent = `[{"type":"input_text","text":"keep diagrams"},{"type":"input_image","image_url":"https://example.org/chart.png"}]`
 		user         = `{"role":"user","content":"summarize"}`
+		guard        = `{"role":"developer","content":"` + openAICompatClaudeCodeTodoGuardMarker + `"}`
 	)
 	for _, tc := range []struct {
 		name, fields, input, wantInstructions, wantInput string
@@ -84,22 +85,30 @@ func TestOpenAIGatewayService_Forward_CompactSystemInstructions(t *testing.T) {
 			wantInput:        `[` + strings.Replace(textOnly, `"system"`, `"developer"`, 1) + `,` + user + `]`,
 		},
 		{
-			name:      "bridge keeps empty instructions",
-			fields:    `"prompt_cache_key":"anthropic-metadata-compact",`,
-			input:     user,
-			wantInput: `[` + user + `]`,
+			name:             "cache key alone does not select the bridge after compact normalization",
+			fields:           `"prompt_cache_key":"anthropic-metadata-compact",`,
+			input:            user,
+			wantInstructions: defaultCodexSynthInstructions("gpt-5.4"),
+			wantInput:        `[` + user + `]`,
+		},
+		{
+			name:      "bridge marker in input keeps empty instructions",
+			input:     guard + `,` + user,
+			wantInput: `[` + guard + `,` + user + `]`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`{"model":"gpt-5.4",` + tc.fields + `"input":[` + tc.input + `]}`)
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+			body, _, err := normalizeOpenAICompactRequestBody(body)
+			require.NoError(t, err)
 			upstream := &httpUpstreamRecorder{resp: &http.Response{
 				StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
 				Body: io.NopCloser(strings.NewReader(`{"id":"resp_compact","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
 			}}
 			svc := &OpenAIGatewayService{httpUpstream: upstream}
-			_, err := svc.Forward(context.Background(), c, instructionsEchoOAuthAccount(false), body)
+			_, err = svc.Forward(context.Background(), c, instructionsEchoOAuthAccount(false), body)
 			require.NoError(t, err)
 			instructions := gjson.GetBytes(upstream.lastBody, "instructions")
 			require.Equal(t, gjson.String, instructions.Type)
