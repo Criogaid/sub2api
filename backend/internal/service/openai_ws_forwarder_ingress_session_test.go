@@ -814,14 +814,16 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CodexImageBridge
 	require.True(t, gjson.Get(nonLitePayload, `tools.#(type=="image_generation")`).Exists())
 	require.Equal(t, "png", gjson.Get(nonLitePayload, `tools.#(type=="image_generation").output_format`).String())
 	require.Equal(t, "auto", gjson.Get(nonLitePayload, "tool_choice").String())
-	require.Contains(t, gjson.Get(nonLitePayload, "instructions").String(), "image_generation")
+	require.Equal(t, codexImageGenerationBridgeText, gjson.Get(nonLitePayload, "instructions").String())
+	require.Equal(t, "draw a cat", gjson.Get(nonLitePayload, "input").String())
 	require.False(t, gjson.Get(nonLitePayload, "reasoning.context").Exists())
 	require.True(t, gjson.Get(nonLitePayload, "parallel_tool_calls").Bool())
 	require.Equal(t, "900719925474099312345", gjson.Get(nonLitePayload, "sequence").Raw)
 
 	litePayload := requestToJSONString(captureConn.writes[1])
 	require.False(t, gjson.Get(litePayload, `tools.#(type=="image_generation")`).Exists())
-	require.NotContains(t, gjson.Get(litePayload, "instructions").String(), "image_generation")
+	require.False(t, gjson.Get(litePayload, "instructions").Exists())
+	requireNoCodexImageBridgeMarker(t, []byte(litePayload))
 	require.Equal(t, "exec", gjson.Get(litePayload, `input.#(type=="additional_tools").tools.0.name`).String())
 	require.Contains(t, gjson.Get(litePayload, `input.#(type=="additional_tools").tools.0.description`).String(), "image_gen.imagegen")
 	require.False(t, gjson.Get(litePayload, `tools.#(type=="namespace")`).Exists())
@@ -837,7 +839,8 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CodexImageBridge
 	require.True(t, gjson.Get(functionPayload, `tools.#(name=="image_gen.imagegen")`).Exists())
 	require.False(t, gjson.Get(functionPayload, `tools.#(type=="image_generation")`).Exists())
 	require.False(t, gjson.Get(functionPayload, "tool_choice").Exists())
-	require.NotContains(t, gjson.Get(functionPayload, "instructions").String(), codexImageGenerationBridgeMarker)
+	require.False(t, gjson.Get(functionPayload, "instructions").Exists())
+	requireNoCodexImageBridgeMarker(t, []byte(functionPayload))
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_DedicatedModeDoesNotReuseConnAcrossSessions(t *testing.T) {

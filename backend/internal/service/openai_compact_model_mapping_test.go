@@ -20,7 +20,7 @@ func TestOpenAIGatewayService_Forward_CompactOnlyModelMappingOverridesOAuthUpstr
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	body := []byte(`{"model":"gpt-5.4","stream":false,"instructions":"compact-test","input":"hello"}`)
+	body := []byte(`{"model":"gpt-5.4","stream":false,"input":"hello"}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
@@ -53,6 +53,7 @@ func TestOpenAIGatewayService_Forward_CompactOnlyModelMappingOverridesOAuthUpstr
 	require.Equal(t, "gpt-5.4", result.Model)
 	require.Equal(t, "gpt-5.4-openai-compact", result.UpstreamModel)
 	require.Equal(t, "gpt-5.4-openai-compact", gjson.GetBytes(upstream.lastBody, "model").String())
+	requireCodexDeveloperInstructions(t, upstream.lastBody, 0, defaultCodexSynthInstructions("gpt-5.4-openai-compact"))
 	opsModel, exists := c.Get(OpsUpstreamModelKey)
 	require.True(t, exists)
 	require.Equal(t, "gpt-5.4-openai-compact", opsModel)
@@ -122,11 +123,11 @@ func TestOpenAIGatewayService_Forward_NormalizesCompactionTriggerAfterHistoryCle
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	items := gjson.GetBytes(upstream.lastBody, "input").Array()
-	require.Len(t, items, 4)
-	require.Equal(t, "function_call", items[0].Get("type").String())
-	require.Equal(t, "function_call_output", items[1].Get("type").String())
-	require.Equal(t, "message", items[2].Get("type").String())
-	require.Equal(t, "compaction_trigger", items[3].Get("type").String())
+	require.Len(t, items, 5)
+	require.Equal(t, "function_call", items[1].Get("type").String())
+	require.Equal(t, "function_call_output", items[2].Get("type").String())
+	require.Equal(t, "message", items[3].Get("type").String())
+	require.Equal(t, "compaction_trigger", items[4].Get("type").String())
 }
 
 func TestOpenAIGatewayService_Forward_NonCompactRequestIgnoresCompactOnlyModelMapping(t *testing.T) {

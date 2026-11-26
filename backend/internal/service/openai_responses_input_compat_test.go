@@ -198,7 +198,8 @@ func TestOpenAIGatewayService_OAuthDropsOrphanAfterDroppingPreviousResponse(t *t
 	require.NotNil(t, result)
 	require.Len(t, upstream.bodies, 1)
 	require.False(t, gjson.GetBytes(upstream.bodies[0], "previous_response_id").Exists())
-	require.Empty(t, gjson.GetBytes(upstream.bodies[0], "input").Array())
+	require.Equal(t, int64(1), gjson.GetBytes(upstream.bodies[0], "input.#").Int())
+	requireCodexDeveloperInstructions(t, upstream.bodies[0], 0, defaultCodexSynthInstructions("gpt-5.5"))
 }
 
 func TestOpenAIGatewayService_PreservesOversizedToolOutputForUpstream(t *testing.T) {

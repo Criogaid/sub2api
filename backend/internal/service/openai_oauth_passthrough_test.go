@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -165,9 +166,11 @@ func TestOpenAIGatewayService_OAuthResponsesPromotesSystemMessageWithoutDuplicat
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.NotEmpty(t, upstream.lastBody)
-	require.Equal(t, systemPrompt+"\n\n"+existingInstructions, gjson.GetBytes(upstream.lastBody, "instructions").String())
-	require.Equal(t, int64(1), gjson.GetBytes(upstream.lastBody, "input.#").Int())
-	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
+	require.Equal(t, existingInstructions, gjson.GetBytes(upstream.lastBody, "instructions").String())
+	require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "input.#").Int())
+	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
+	require.Equal(t, systemPrompt, gjson.GetBytes(upstream.lastBody, "input.0.content").String())
+	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.1.role").String())
 	require.Equal(t, 1, strings.Count(string(upstream.lastBody), systemPrompt))
 }
 
@@ -258,7 +261,10 @@ func TestOpenAIGatewayService_OAuthMessagesBridgeDoesNotInjectDefaultInstruction
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.Equal(t, "", gjson.GetBytes(upstream.lastBody, "instructions").String())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
+	require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "input.#").Int())
+	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
+	require.Equal(t, "<sub2api-claude-code-todo-guard>", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.NotEmpty(t, upstream.lastReq.Header.Get("Session_Id"))
 	require.Empty(t, upstream.lastReq.Header.Get("Conversation_Id"))
@@ -687,8 +693,8 @@ func TestOpenAIGatewayService_NativeOAuth_FlattenEnabledNamespaceRequestAndStrea
 	require.NotNil(t, result)
 	require.Equal(t, "function", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
 	require.Equal(t, "collaboration__spawn_agent", gjson.GetBytes(upstream.lastBody, "tools.0.name").String())
-	require.Equal(t, "collaboration__spawn_agent", gjson.GetBytes(upstream.lastBody, "input.0.name").String())
-	require.False(t, gjson.GetBytes(upstream.lastBody, "input.0.namespace").Exists())
+	require.Equal(t, "collaboration__spawn_agent", gjson.GetBytes(upstream.lastBody, "input.1.name").String())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "input.1.namespace").Exists())
 	require.NotContains(t, rec.Body.String(), "collaboration__spawn_agent")
 	require.Contains(t, rec.Body.String(), `"name":"spawn_agent"`)
 	require.Contains(t, rec.Body.String(), `"namespace":"collaboration"`)
@@ -965,13 +971,118 @@ func TestOpenAIGatewayService_Forward_MissingInstructionsUsesMappedModelTemplate
 		Status: StatusActive, Schedulable: true, RateMultiplier: f64p(1),
 	}
 
-	result, err := svc.Forward(context.Background(), c, account, []byte(`{"model":"astra-public","stream":true,"store":true,"input":[{"type":"text","text":"hi"}]}`))
+	body := []byte(`{"model":"astra-public","stream":true,"store":true,"input":[{"type":"message","role":"user","content":"hi"}]}`)
+	result, err := svc.Forward(context.Background(), c, account, body)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "gpt-6-astra", gjson.GetBytes(upstream.lastBody, "model").String())
-	instructions := gjson.GetBytes(upstream.lastBody, "instructions").String()
-	require.True(t, strings.HasPrefix(strings.TrimSpace(instructions), "You are Codex, an agent based on GPT-6."))
-	require.NotContains(t, instructions, "You are Codex, a coding agent based on GPT-5.")
+	requireCodexDeveloperInstructions(t, upstream.lastBody, 0, defaultCodexSynthInstructions("gpt-6-astra"))
+	require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "input.#").Int())
+	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.1.role").String())
+}
+
+func TestOpenAIGatewayService_Forward_PreservesLeadingDeveloperPrefix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		devArr   = `{"type":"message","role":"developer","content":[{"type":"input_text","text":"Use the caller's project rules."}]}`
+		devStr   = `{"type":"message","role":"developer","content":"Client developer instructions."}`
+		blankDev = `{"type":"message","role":"developer","content":[{"type":"input_text","text":" \t"}]}`
+		tools    = `{"type":"additional_tools","role":"developer","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`
+		user     = `{"type":"message","role":"user","content":"hi"}`
+	)
+	for _, tc := range []struct {
+		name             string
+		userAgent        string
+		lite             bool
+		bridge           bool
+		model            string
+		mappedModel      string
+		input            string
+		instructions     string
+		wantDefault      bool
+		wantTopLevelInst string
+	}{
+		{
+			name: "codex_0_171_array_prefix_skips_default", userAgent: "codex-tui/0.171.0",
+			model: "gpt-6.2-sol", input: devArr + "," + user,
+		},
+		{
+			name: "responses_lite_after_additional_tools_with_mapping_and_blank_instructions", userAgent: "codex-tui/0.171.0",
+			lite: true, model: "gpt-6.2-astra", mappedModel: "gpt-6.2-sol",
+			input: tools + "," + devArr + "," + user, instructions: `,"instructions":" "`,
+		},
+		{
+			name: "non_codex_string_developer_prefix_skips_default", userAgent: "OpenAI/Python 2.8.0",
+			model: "gpt-6.2-sol", input: devStr + "," + user,
+		},
+		{
+			name: "explicit_turn_scoped_instructions_preserved_at_top_level", userAgent: "codex-tui/0.171.0",
+			model: "gpt-6.2-sol", input: devArr + "," + user,
+			instructions: `,"instructions":"Only this turn."`, wantTopLevelInst: "Only this turn.",
+		},
+		{
+			name: "image_bridge_keeps_turn_scoped_directive_at_top_level_and_echoes_null", userAgent: "codex_cli_rs/0.171.0",
+			bridge: true, model: "gpt-6.2-sol", input: devArr + "," + user,
+			wantTopLevelInst: codexImageGenerationBridgeText,
+		},
+		{
+			name: "blank_developer_falls_back_to_default", userAgent: "codex-tui/0.171.0",
+			model: "gpt-6.2-sol", input: blankDev + "," + user, wantDefault: true,
+		},
+		{
+			name: "late_developer_falls_back_to_default", userAgent: "codex-tui/0.171.0",
+			model: "gpt-6.2-sol", input: user + "," + devArr, wantDefault: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"` + tc.model + `","stream":true,"input":[` + tc.input + `]` + tc.instructions + `}`
+			wantModel := tc.model
+			account := instructionsEchoOAuthAccount(false)
+			if tc.mappedModel != "" {
+				account.Credentials["model_mapping"] = map[string]any{tc.model: tc.mappedModel}
+				wantModel = tc.mappedModel
+			}
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+			c.Request.Header.Set("User-Agent", tc.userAgent)
+			if tc.lite {
+				c.Request.Header.Set(responsesLiteHeader, "true")
+			}
+			SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+			upstreamEcho := "null"
+			if tc.wantTopLevelInst != "" {
+				encodedEcho, err := json.Marshal(tc.wantTopLevelInst)
+				require.NoError(t, err)
+				upstreamEcho = string(encodedEcho)
+			}
+			upstream := instructionsEchoUpstream(upstreamEcho)
+			cfg := &config.Config{}
+			cfg.Gateway.CodexImageGenerationBridgeEnabled = tc.bridge
+			svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+
+			result, err := svc.Forward(context.Background(), c, account, []byte(body))
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, wantModel, gjson.GetBytes(upstream.lastBody, "model").String())
+
+			if tc.wantDefault {
+				requireCodexDeveloperInstructions(t, upstream.lastBody, 0, defaultCodexSynthInstructions(wantModel))
+				return
+			}
+			if tc.wantTopLevelInst != "" {
+				require.Equal(t, tc.wantTopLevelInst, gjson.GetBytes(upstream.lastBody, "instructions").String())
+			} else {
+				require.False(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
+			}
+			require.JSONEq(t, gjson.Get(body, "input").Raw, gjson.GetBytes(upstream.lastBody, "input").Raw)
+			if tc.bridge {
+				require.Equal(t, gjson.Null, sseResponseInstructions(t, rec.Body.String(), "response.completed").Type)
+			} else if tc.wantTopLevelInst != "" {
+				require.Equal(t, tc.wantTopLevelInst, sseResponseInstructions(t, rec.Body.String(), "response.completed").String())
+			}
+		})
+	}
 }
 
 func TestOpenAIGatewayService_OAuthPassthrough_DisabledUsesLegacyTransform(t *testing.T) {

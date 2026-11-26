@@ -52,9 +52,14 @@ func TestForward_OAuthWebSearchHistoryDeclaresTool(t *testing.T) {
 			require.Equal(t, astraProCodexResponsesURL, s.upstream.lastReq.URL.String())
 
 			forwarded := s.upstream.lastBody
-			require.Equal(t, "web_search_call", gjson.GetBytes(forwarded, "input.1.type").String())
-			require.Equal(t, "none", gjson.GetBytes(forwarded, "tool_choice").String())
 			items := gjson.GetBytes(forwarded, "input").Array()
+			webSearchIndex := 1
+			if !tc.passthrough {
+				requireCodexDeveloperInstructions(t, forwarded, 0, "x")
+				webSearchIndex++
+			}
+			require.Equal(t, "web_search_call", items[webSearchIndex].Get("type").String())
+			require.Equal(t, "none", gjson.GetBytes(forwarded, "tool_choice").String())
 			require.Equal(t, "compaction_trigger", items[len(items)-1].Get("type").String())
 			if !tc.lite {
 				tools := gjson.GetBytes(forwarded, "tools").Array()

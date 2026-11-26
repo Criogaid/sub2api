@@ -204,9 +204,17 @@ func TestOpenAIGatewayService_OAuthAdditionalToolsDeclarationID(t *testing.T) {
 					require.Equal(t, wantID, gjson.GetBytes(upstream.lastBody, "input.0.id").String())
 					require.Equal(t, "at_00112233-4455-4677-8899-aabbccddeeff", gjson.GetBytes(body, "input.0.id").String())
 					require.JSONEq(t, gjson.GetBytes(body, "input.0.tools").Raw, gjson.GetBytes(upstream.lastBody, "input.0.tools").Raw)
-					require.Equal(t, passthrough, gjson.GetBytes(upstream.lastBody, "input.1.id").Exists())
-					require.Equal(t, passthrough, gjson.GetBytes(upstream.lastBody, "input.2.id").Exists())
-					require.Equal(t, "sealed", gjson.GetBytes(upstream.lastBody, "input.2.encrypted_content").String())
+					userIndex := 1
+					if !passthrough {
+						requireCodexDeveloperInstructions(t, upstream.lastBody, 1, "test instructions")
+						userIndex++
+					}
+					items := gjson.GetBytes(upstream.lastBody, "input").Array()
+					require.Len(t, items, userIndex+2)
+					require.Equal(t, "user", items[userIndex].Get("role").String())
+					require.Equal(t, passthrough, items[userIndex].Get("id").Exists())
+					require.Equal(t, passthrough, items[userIndex+1].Get("id").Exists())
+					require.Equal(t, "sealed", items[userIndex+1].Get("encrypted_content").String())
 					require.Contains(t, recorder.Body.String(), `"type":"tool_search_call"`)
 					require.Contains(t, recorder.Body.String(), `"call_id":"tsc_discovery"`)
 					require.NotContains(t, recorder.Body.String(), `"type":"function_call"`)

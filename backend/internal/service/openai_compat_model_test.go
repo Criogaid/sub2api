@@ -1401,9 +1401,7 @@ func TestForwardAsAnthropic_OAuthKeepsSystemAsDeveloperInput(t *testing.T) {
 	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
 	require.Equal(t, "input_text", gjson.GetBytes(upstream.lastBody, "input.0.content.0.type").String())
 	require.Equal(t, "project instructions", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
-	instructions := gjson.GetBytes(upstream.lastBody, "instructions")
-	require.True(t, instructions.Exists())
-	require.Empty(t, instructions.String())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
 	requireOpenAIMessagesCodexIdentity(t, upstream.requests[0], codexCLIUserAgent, openai.CodexDefaultOriginator)
 }
 
@@ -1612,7 +1610,11 @@ func TestForwardAsAnthropic_ForcedCodexInstructionsTemplatePrependsRenderedInstr
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.1")
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, "server-prefix\n\nclient-system", gjson.GetBytes(upstream.lastBody, "instructions").String())
+	requireCodexDeveloperInstructions(t, upstream.lastBody, 0, "server-prefix\n\nclient-system")
+	items := gjson.GetBytes(upstream.lastBody, "input").Array()
+	require.GreaterOrEqual(t, len(items), 2)
+	require.Equal(t, "user", items[len(items)-1].Get("role").String())
+	require.Equal(t, "hello", items[len(items)-1].Get("content.0.text").String())
 }
 
 func TestForwardAsAnthropic_ForcedCodexInstructionsTemplateUsesCachedTemplateContent(t *testing.T) {
@@ -1659,7 +1661,11 @@ func TestForwardAsAnthropic_ForcedCodexInstructionsTemplateUsesCachedTemplateCon
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.1")
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, "cached-prefix\n\nclient-system", gjson.GetBytes(upstream.lastBody, "instructions").String())
+	requireCodexDeveloperInstructions(t, upstream.lastBody, 0, "cached-prefix\n\nclient-system")
+	items := gjson.GetBytes(upstream.lastBody, "input").Array()
+	require.GreaterOrEqual(t, len(items), 2)
+	require.Equal(t, "user", items[len(items)-1].Get("role").String())
+	require.Equal(t, "hello", items[len(items)-1].Get("content.0.text").String())
 }
 
 func TestForwardAsAnthropic_ClientDisconnectDrainsUpstreamUsage(t *testing.T) {

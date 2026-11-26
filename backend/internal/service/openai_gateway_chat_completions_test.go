@@ -911,9 +911,9 @@ func TestForwardAsChatCompletions_OAuthDoesNotInjectDefaultInstructions(t *testi
 	require.Nil(t, result)
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, chatgptCodexURL, upstream.lastReq.URL.String())
-	require.True(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
-	require.Equal(t, "", gjson.GetBytes(upstream.lastBody, "instructions").String())
-	require.NotContains(t, string(upstream.lastBody), "Communicate with the user by streaming thinking")
+	require.False(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
+	require.Equal(t, int64(1), gjson.GetBytes(upstream.lastBody, "input.#").Int())
+	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
 }
 
 func forwardOAuthChatCompletionsForUpstreamBody(t *testing.T, body []byte) []byte {
@@ -950,15 +950,52 @@ func forwardOAuthChatCompletionsForUpstreamBody(t *testing.T, body []byte) []byt
 	return upstream.lastBody
 }
 
+func TestForwardAsChatCompletions_OAuthMovesResponsesShapeInstructionsToDeveloperInput(t *testing.T) {
+	t.Run("explicit instructions with array input", func(t *testing.T) {
+		const instructions = "Client Responses instructions."
+		body := []byte(`{"model":"gpt-5.4","instructions":"` + instructions + `","input":[{"type":"message","role":"user","content":"hello"}],"stream":false}`)
+
+		upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+		requireCodexDeveloperInstructions(t, upstreamBody, 0, instructions)
+		require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
+		require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
+		require.Equal(t, "hello", gjson.GetBytes(upstreamBody, "input.1.content").String())
+	})
+
+	t.Run("missing instructions with string input injects default", func(t *testing.T) {
+		body := []byte(`{"model":"gpt-5.4","input":"hello","stream":false}`)
+
+		upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+		requireCodexDeveloperInstructions(t, upstreamBody, 0, defaultCodexSynthInstructions("gpt-5.4"))
+		require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
+		require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
+		require.Equal(t, "hello", gjson.GetBytes(upstreamBody, "input.1.content").String())
+	})
+
+	t.Run("leading developer prefix skips default and preserves turn-scoped instructions", func(t *testing.T) {
+		body := []byte(`{"model":"gpt-6.2-sol","instructions":"Only this turn.","input":[{"type":"message","role":"developer","content":"Stable prefix."},{"type":"message","role":"user","content":"hello"}],"stream":false}`)
+
+		upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+		require.Equal(t, "Only this turn.", gjson.GetBytes(upstreamBody, "instructions").String())
+		require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
+		require.Equal(t, "developer", gjson.GetBytes(upstreamBody, "input.0.role").String())
+		require.Equal(t, "Stable prefix.", gjson.GetBytes(upstreamBody, "input.0.content").String())
+		require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
+	})
+}
+
 func TestForwardAsChatCompletions_OAuthPromotesSystemMessageWithoutDuplication(t *testing.T) {
 	const systemPrompt = "Unique system prefix for token accounting."
 	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"system","content":"` + systemPrompt + `"},{"role":"user","content":"hello"}],"stream":false}`)
 
 	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
 
-	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "instructions").String())
-	require.Equal(t, int64(1), gjson.GetBytes(upstreamBody, "input.#").Int())
-	require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.0.role").String())
+	requireCodexDeveloperInstructions(t, upstreamBody, 0, systemPrompt)
+	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
+	require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
 	require.Equal(t, 1, strings.Count(string(upstreamBody), systemPrompt))
 }
 
@@ -968,11 +1005,10 @@ func TestForwardAsChatCompletions_OAuthJsonObjectKeepsSystemMessageInInput(t *te
 
 	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
 
-	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "instructions").String())
+	requireCodexDeveloperInstructions(t, upstreamBody, 0, systemPrompt)
 	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
-	require.Equal(t, "developer", gjson.GetBytes(upstreamBody, "input.0.role").String())
-	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "input.0.content").String())
-	require.Equal(t, 2, strings.Count(string(upstreamBody), systemPrompt))
+	require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
+	require.Equal(t, 1, strings.Count(string(upstreamBody), systemPrompt))
 }
 
 func TestForwardAsChatCompletions_OAuthKeepsMixedSystemContentInInput(t *testing.T) {
@@ -981,12 +1017,15 @@ func TestForwardAsChatCompletions_OAuthKeepsMixedSystemContentInInput(t *testing
 
 	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
 
-	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "instructions").String())
+	require.False(t, gjson.GetBytes(upstreamBody, "instructions").Exists())
 	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
 	require.Equal(t, "developer", gjson.GetBytes(upstreamBody, "input.0.role").String())
 	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.0.content.#").Int())
+	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "input.0.content.0.text").String())
 	require.Equal(t, "input_image", gjson.GetBytes(upstreamBody, "input.0.content.1.type").String())
 	require.Equal(t, "https://example.com/reference.png", gjson.GetBytes(upstreamBody, "input.0.content.1.image_url").String())
+	require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
+	require.Equal(t, 1, strings.Count(string(upstreamBody), systemPrompt))
 }
 
 func TestForwardAsChatCompletions_ClientDisconnectDrainsUpstreamUsage(t *testing.T) {
