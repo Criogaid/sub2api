@@ -993,8 +993,10 @@ func TestForwardAsChatCompletions_OAuthPromotesSystemMessageWithoutDuplication(t
 
 	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
 
-	requireCodexDeveloperInstructions(t, upstreamBody, 0, systemPrompt)
+	require.False(t, gjson.GetBytes(upstreamBody, "instructions").Exists())
 	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
+	require.Equal(t, "developer", gjson.GetBytes(upstreamBody, "input.0.role").String())
+	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "input.0.content").String())
 	require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
 	require.Equal(t, 1, strings.Count(string(upstreamBody), systemPrompt))
 }
@@ -1005,8 +1007,10 @@ func TestForwardAsChatCompletions_OAuthJsonObjectKeepsSystemMessageInInput(t *te
 
 	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
 
-	requireCodexDeveloperInstructions(t, upstreamBody, 0, systemPrompt)
+	require.False(t, gjson.GetBytes(upstreamBody, "instructions").Exists())
 	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.#").Int())
+	require.Equal(t, "developer", gjson.GetBytes(upstreamBody, "input.0.role").String())
+	require.Equal(t, systemPrompt, gjson.GetBytes(upstreamBody, "input.0.content").String())
 	require.Equal(t, "user", gjson.GetBytes(upstreamBody, "input.1.role").String())
 	require.Equal(t, 1, strings.Count(string(upstreamBody), systemPrompt))
 }

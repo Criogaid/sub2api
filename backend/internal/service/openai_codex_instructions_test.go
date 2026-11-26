@@ -16,8 +16,10 @@ func requireCodexDeveloperInstructions(t *testing.T, body []byte, index int, wan
 	item := items[index]
 	require.Equal(t, "message", item.Get("type").String())
 	require.Equal(t, "developer", item.Get("role").String())
-	require.Equal(t, gjson.String, item.Get("content").Type)
-	require.Equal(t, want, item.Get("content").String())
+	require.True(t, item.Get("content").IsArray())
+	require.Equal(t, int64(1), item.Get("content.#").Int())
+	require.Equal(t, "input_text", item.Get("content.0.type").String())
+	require.Equal(t, want, item.Get("content.0.text").String())
 }
 
 // requireNoCodexImageBridgeMarker checks decoded JSON values rather than raw
@@ -46,7 +48,7 @@ func requireNoCodexImageBridgeMarker(t *testing.T, body []byte) {
 
 func TestApplyCodexOAuthInstructionsAsDeveloper(t *testing.T) {
 	const (
-		developer      = `{"type":"message","role":"developer","content":" base prompt "}`
+		developer      = `{"type":"message","role":"developer","content":[{"type":"input_text","text":" base prompt "}]}`
 		existingDev    = `{"type":"message","role":"developer","content":"client prefix"}`
 		existingDevArr = `{"type":"message","role":"developer","content":[{"type":"input_text","text":"client prefix"}]}`
 		blankDev       = `{"type":"message","role":"developer","content":" \t\n"}`

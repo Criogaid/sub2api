@@ -149,10 +149,11 @@ func TestOpenAIGatewayService_OAuthCompactKeepsFlattening(t *testing.T) {
 	require.Len(t, upstream.bodies, 1)
 	forwarded := upstream.bodies[0]
 
+	require.False(t, gjson.GetBytes(forwarded, "input.0.namespace").Exists())
 	require.False(t, gjson.GetBytes(forwarded, "input.1.namespace").Exists())
-	require.False(t, gjson.GetBytes(forwarded, "input.2.namespace").Exists())
 	require.False(t, gjson.GetBytes(forwarded, `tools.#(type=="namespace")`).Exists())
-	require.Equal(t, "collaboration__spawn_agent", gjson.GetBytes(forwarded, "input.1.name").String())
+	require.Equal(t, "collaboration__spawn_agent", gjson.GetBytes(forwarded, "input.0.name").String())
+	require.Equal(t, "test", gjson.GetBytes(forwarded, "instructions").String())
 }
 
 // 账号开关为不认识 namespace 的兼容上游保留退路：打开后恢复 0.1.166 的摊平行为。
